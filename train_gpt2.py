@@ -93,6 +93,23 @@ class GPT(nn.Module):
         ))
         self.lm_head=nn.Linear(config.n_embd,config.vocab_size,bias=False)
 
+    def forward(self,idx):
+        # 作为输入，idx(B,T)(Batch_size,序列长度)
+        B,T=idx.size()
+        assert T<=self.config.block_size,f"cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        # foward前向传播token和位置编码
+        pos=torch.arange(0,T,dtype=torch.long,device=idx.device) # shape:(T)
+        pos_emb=self.transformer.wpe(pos) # 位置嵌入，shape(T,n_embd)
+        tok_emb=self.transformer.wte(idx) # token嵌入，shape(B,T,n_embd)
+        x=tok_emb+pos_emb
+        # 前向传播transformer模块
+        for block in self.transformer.h:
+            x=block(x)
+        # 前向传播最后的layernorm和classifier
+        x=self.transformer.ln_f(x)
+        logits=self.lm_head(x) # shape(B,T,vocab_size)
+        return logits 
+    
     @classmethod
     def from_pretrained(cls,model_type):
         '''从huggingface加载预训练好的GPT-2模型'''
