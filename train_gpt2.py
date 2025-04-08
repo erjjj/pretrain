@@ -160,5 +160,47 @@ class GPT(nn.Module):
         return model
     
 # ----------------------------------------------------------------------------
+num_return_sequences=5
+max_length=30
+
 model=GPT.from_pretrained('gpt2')
-print("didn't crash yay!")
+model.eval()
+model.to('cuda')
+
+# 设置 prefix tokens
+import tiktoken
+enc=tiktoken.get_encoding('gpt2')
+tokens=enc.encode("Hello, I'm a language model,")
+tokens=torch.tensor(tokens,dtype=torch.long) # (8,)
+tokens=tokens.unsqueeze(0).repeat(num_return_sequences,1) # (5,8)在第0维加一个维度，并在第0维重复num_return_sequences次
+x=tokens.to('cuda')
+
+# 下面开始生成，x的形状为(B,T) 这里B=5，T=8
+# 设置随机种子维42
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1)<max_length:
+    # 前向传播模型获取logits词表的输出结果
+    with torch.no_grad():
+        logits=model(x) # (B,T,vocab_size)
+        # 截取logits序列长度维最后一个要素的vocab编号
+        logits=logits[:,-1,:] # (B,vocab_size)
+        # 计算输出词在各个词汇表中的概率分布
+        probs=F.softmax(logits,dim=-1)
+        # 取默认前50名的vocab（huggingface默认操作）
+        # 下面得到topk_probs shape(5,50),topk_indices shape(5,50)
+        topk_probs,topk_indices=torch.topk(probs,50,dim=-1)
+        # 从中选取一个token
+        # 多项式不要求输入向量的和为1
+        ix=torch.multinomial(topk_probs,1) # (B,1)
+        # 获取topk_indices第-1维的第ix个数据，也就是选取的token向量的索引
+        xcol=torch.gather(topk_indices,-1,ix) # (B,1)
+        # 放置到序列尾部
+        x=torch.cat((x,xcol),dim=1)
+
+# 打印生成的文本
+for i in range(num_return_sequences):
+    tokens=x[i,:max_length].tolist()
+    decoded=enc.decode(tokens)
+    print(">",decoded)
+    
