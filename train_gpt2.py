@@ -93,7 +93,7 @@ class GPT(nn.Module):
         ))
         self.lm_head=nn.Linear(config.n_embd,config.vocab_size,bias=False)
 
-    def forward(self,idx):
+    def forward(self,idx,targets=None):
         # 作为输入，idx(B,T)(Batch_size,序列长度)
         B,T=idx.size()
         assert T<=self.config.block_size,f"cannot forward sequence of length {T}, block size is only {self.config.block_size}"
@@ -108,7 +108,10 @@ class GPT(nn.Module):
         # 前向传播最后的layernorm和classifier
         x=self.transformer.ln_f(x)
         logits=self.lm_head(x) # shape(B,T,vocab_size)
-        return logits 
+        loss=None
+        if targets is not None:
+            loss=F.cross_entropy(logits.view(-1,logits.size(-1)),targets.view(-1)) # 把前2维合并起来(B,T)->(B*T)
+        return logits,loss 
     
     @classmethod
     def from_pretrained(cls,model_type):
@@ -184,9 +187,9 @@ y=buf[1:].view(B,T)
 # 计算由x预测出的logits
 model=GPT(GPTConfig())
 model.to(device)
-logits=model(x)
+logits,loss=model(x,y)
 
-print(logits.shape) # 运行了一下，结果[4,32,50257]
+print(loss) # 运行了一下，结果[4,32,50257]
 import sys; sys.exit(0)
 
 # 设置 prefix tokens
