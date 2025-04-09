@@ -93,6 +93,9 @@ class GPT(nn.Module):
         ))
         self.lm_head=nn.Linear(config.n_embd,config.vocab_size,bias=False)
 
+        # token嵌入层的权重与输出投影线性层权重绑定，GPT2的trick
+        self.transformer.wte.weight=self.lm_head.weight
+
     def forward(self,idx,targets=None):
         # 作为输入，idx(B,T)(Batch_size,序列长度)
         B,T=idx.size()
