@@ -170,7 +170,6 @@ if torch.cuda.is_available():
 elif hasattr(torch.backends,"mps") and torch.backends.mps.is_available():
     device="mps"
 print(f"using device: {device}")
-device='cpu' # 这一步先用cpu来做
 
 # get a data batch
 import tiktoken
@@ -181,15 +180,23 @@ text=text[:1000]
 tokens=enc.encode(text)
 B,T=4,32
 buf=torch.tensor(tokens[:B*T+1])
+buf=buf.to(device)
 x=buf[:-1].view(B,T)
 y=buf[1:].view(B,T)
 
 # 计算由x预测出的logits
 model=GPT(GPTConfig())
 model.to(device)
-logits,loss=model(x,y)
 
-print(loss) # 运行了一下，结果[4,32,50257]
+# 优化！梯度下降
+optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4)
+for i in range(50):
+    optimizer.zero_grad()
+    logits,loss=model(x,y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss: {loss.item()}") # 梯度下降标准流程
+
 import sys; sys.exit(0)
 
 # 设置 prefix tokens
