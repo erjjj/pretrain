@@ -243,7 +243,8 @@ for i in range(50):
     x,y=train_loader.next_batch()
     x,y=x.to(device),y.to(device)
     optimizer.zero_grad()
-    logits,loss=model(x,y)
+    with torch.autocast(device_type=device,dtype=torch.bfloat16): # 利用自动混合精度的上下文管理器autocast，将model中部分运算操作的精度转换为bfloat16，可以提升效率并减少内存消耗
+        logits,loss=model(x,y)
     loss.backward()
     optimizer.step()
     torch.cuda.synchronize() # 等待GPU完成当前工作,确保time.time()计时的是GPU运行的时间
