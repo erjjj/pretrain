@@ -229,7 +229,7 @@ train_loader=DataLoaderLite(B=8,T=512)
 torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能与精度水平，'high'设置为允许使用 TensorFloat-32（TF32），取性能和精度之间的一个平衡点
 
 # 计算由x预测出的logits
-model=GPT(GPTConfig())
+model=GPT(GPTConfig(vocab_size=50304)) # 50304= 128*393，50304可以被更高的2的幂次数整除，更符合GPU的架构
 model.to(device)
 model=torch.compile(model) # 对模型编译，加速训练和推理，需torch2以上版本
 
