@@ -234,7 +234,7 @@ model.to(device)
 model=torch.compile(model) # 对模型编译，加速训练和推理，需torch2以上版本
 
 # 优化！梯度下降
-optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4)
+optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4, betas=(0.9,0.95), eps=1e-8)
 for i in range(50):
     t0=time.time()
     x,y=train_loader.next_batch()
@@ -243,13 +243,14 @@ for i in range(50):
     with torch.autocast(device_type=device,dtype=torch.bfloat16): # 利用自动混合精度的上下文管理器autocast，将model中部分运算操作的精度转换为bfloat16，可以提升效率并减少内存消耗
         logits,loss=model(x,y)
     loss.backward()
+    norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0) # 如果梯度范数大于1.0，则把所有参数的梯度按比例缩小，使范数变为1.0，这里返回的是裁剪前的梯度范数
     optimizer.step()
     torch.cuda.synchronize() # 等待GPU完成当前工作,确保time.time()计时的是GPU运行的时间
     t1=time.time()
     dt=t1-t0 # 以秒为单位展示耗时
     tokens_processed=train_loader.B*train_loader.T
     tokens_per_sec=tokens_processed/dt
-    print(f"step {i:4d} | loss: {loss.item():.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
+    print(f"step {i:4d} | loss: {loss.item():.6f} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
 
 import sys; sys.exit(0)
 
