@@ -235,6 +235,7 @@ torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能�
 # 计算由x预测出的logits
 model=GPT(GPTConfig())
 model.to(device)
+model=torch.compile(model) # 对模型编译，加速训练和推理，需torch2以上版本
 
 # 优化！梯度下降
 optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4)
