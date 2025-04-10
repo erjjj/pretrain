@@ -215,6 +215,8 @@ class DataLoaderLite:
     
 # ----------------------------------------------------------------------------
 # 生成前自动检测设备
+import time
+
 device='cpu'
 if torch.cuda.is_available():
     device="cuda"
@@ -226,7 +228,9 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader=DataLoaderLite(B=4,T=32)
+train_loader=DataLoaderLite(B=8,T=512)
+
+torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能与精度水平，'high'设置为允许使用 TensorFloat-32（TF32），取性能和精度之间的一个平衡点
 
 # 计算由x预测出的logits
 model=GPT(GPTConfig())
@@ -235,13 +239,18 @@ model.to(device)
 # 优化！梯度下降
 optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4)
 for i in range(50):
+    t0=time.time()
     x,y=train_loader.next_batch()
     x,y=x.to(device),y.to(device)
     optimizer.zero_grad()
     logits,loss=model(x,y)
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss: {loss.item()}") # 梯度下降标准流程
+    torch.cuda.synchronize() # 等待GPU完成当前工作,确保time.time()计时的是GPU运行的时间
+    t1=time.time()
+    dt=(t1-t0)*1000 # 以毫秒为单位展示时间
+    tokens_per_sec=(train_loader.B*train_loader.T)/(t1-t0)
+    print(f"step {i}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}") # 梯度下降标准流程
 
 import sys; sys.exit(0)
 
