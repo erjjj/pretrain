@@ -34,11 +34,7 @@ class CausalSelfAttention(nn.Module):
         k=k.view(B,T,self.n_head,C//self.n_head).transpose(1,2) # 分割-维度交换(B,nh,T,hs)
         q=q.view(B,T,self.n_head,C//self.n_head).transpose(1,2) 
         v=v.view(B,T,self.n_head,C//self.n_head).transpose(1,2)
-        # 注意力计算，对每个head（每对q,k)计算注意力方阵(T,T)
-        att=(q@k.transpose(-2,-1))*(1.0/math.sqrt(k.size(-1)))
-        att=att.masked_fill(self.bias[:,:,:T,:T]==0,float('-inf')) # 保留att下三角矩阵的值，其余部分设置为0，让att中的相应行只能看到这一行之前的内容
-        att=F.softmax(att,dim=-1) # 最后一维softmax，将方形矩阵的每一行转为概率权重
-        y=att@v # (B,nh,T,T)@(B,nh,T,hs)->(B,nh,T,hs)
+        y=F.scaled_dot_product_attention(q,k,v,is_causal=True) # 加入flash attention
         y=y.transpose(1,2).contiguous().view(B,T,C) # 逐头重组得
         # 自注意力层输出
         y=self.c_proj(y)
