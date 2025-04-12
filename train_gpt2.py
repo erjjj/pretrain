@@ -248,7 +248,15 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader=DataLoaderLite(B=8,T=512)
+total_batch_size=524288 # 2^19, ~0.5M, 数量的tokens
+B=8 # 小批量batch
+T=512 # 序列长度
+assert total_batch_size%(B*T)==0, "make sure total_batch_size is divisible by B*T"
+grad_accum_steps=total_batch_size//(B*T)
+print(f"total desired batch size: {total_batch_size}")
+print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+
+train_loader=DataLoaderLite(B=B,T=T)
 
 torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能与精度水平，'high'设置为允许使用 TensorFloat-32（TF32），取性能和精度之间的一个平衡点
 
@@ -279,12 +287,20 @@ optimizer=model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=
 
 for step in range(max_steps):
     t0=time.time()
-    x,y=train_loader.next_batch()
-    x,y=x.to(device),y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device,dtype=torch.bfloat16): # 利用自动混合精度的上下文管理器autocast，将model中部分运算操作的精度转换为bfloat16，可以提升效率并减少内存消耗
-        logits,loss=model(x,y)
-    loss.backward()
+    loss_accum=0.0
+    for micro_step in range(grad_accum_steps): 
+        x,y=train_loader.next_batch()
+        x,y=x.to(device),y.to(device)
+        with torch.autocast(device_type=device,dtype=torch.bfloat16): # 利用自动混合精度的上下文管理器autocast，将model中部分运算操作的精度转换为bfloat16，可以提升效率并减少内存消耗
+            logits,loss=model(x,y)
+        # 在grad_accum_steps内，要放缩loss，以适应梯度累积
+        # backward()会累积各个grad_accum_steps下的梯度
+        # 得到的是grad_accum_steps倍的参数矩阵的梯度
+        # 我们要的是梯度均值，除以梯度累计的次数即可
+        loss=loss/grad_accum_steps
+        loss_accum+=loss.detach()
+        loss.backward() # 求的是optimizer.zero_grad()前的梯度累积，而不是这里loss的梯度
     norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0) # 如果梯度范数大于1.0，则把所有参数的梯度按比例缩小，使范数变为1.0，这里返回的是裁剪前的梯度范数
     # 设置此轮epoch的学习率
     lr=get_lr(step)
@@ -294,9 +310,9 @@ for step in range(max_steps):
     torch.cuda.synchronize() # 等待GPU完成当前工作,确保time.time()计时的是GPU运行的时间
     t1=time.time()
     dt=t1-t0 # 以秒为单位展示耗时
-    tokens_processed=train_loader.B*train_loader.T
+    tokens_processed=train_loader.B*train_loader.T*grad_accum_steps
     tokens_per_sec=tokens_processed/dt
-    print(f"step {step:4d} | loss: {loss.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
+    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
 
 import sys; sys.exit(0)
 
