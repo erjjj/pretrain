@@ -233,9 +233,26 @@ model=GPT(GPTConfig(vocab_size=50304)) # 50304= 128*393，50304可以被更高�
 model.to(device)
 model=torch.compile(model) # 对模型编译，加速训练和推理，需torch2以上版本
 
+max_lr=6e-4
+min_lr=max_lr*0.1
+warmup_steps=10
+max_steps=50
+def get_lr(it):
+    # 1) 对于前warmup_iters步steps，线性提高学习率
+    if it<warmup_steps:
+        return max_lr*(it+1)/warmup_steps
+    # 2) 若超出了学习率衰减阶段，采用最低学习率
+    if it>max_steps:
+        return min_lr
+    # 3) warmup_steps与max_steps之间，采用cos衰减到最小学习率
+    decay_ratio=(it-warmup_steps)/(max_steps-warmup_steps)
+    assert 0<=decay_ratio<=1
+    coeff=0.5*(1.0+math.cos(math.pi*decay_ratio)) # decay_ratio从0升到1，cos从1降为-1，coeff从1降为0
+    return min_lr+coeff*(max_lr-min_lr)
+
 # 优化！梯度下降
 optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4, betas=(0.9,0.95), eps=1e-8)
-for i in range(50):
+for step in range(max_steps):
     t0=time.time()
     x,y=train_loader.next_batch()
     x,y=x.to(device),y.to(device)
@@ -244,13 +261,17 @@ for i in range(50):
         logits,loss=model(x,y)
     loss.backward()
     norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0) # 如果梯度范数大于1.0，则把所有参数的梯度按比例缩小，使范数变为1.0，这里返回的是裁剪前的梯度范数
+    # 设置此轮epoch的学习率
+    lr=get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr']=lr
     optimizer.step()
     torch.cuda.synchronize() # 等待GPU完成当前工作,确保time.time()计时的是GPU运行的时间
     t1=time.time()
     dt=t1-t0 # 以秒为单位展示耗时
     tokens_processed=train_loader.B*train_loader.T
     tokens_per_sec=tokens_processed/dt
-    print(f"step {i:4d} | loss: {loss.item():.6f} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
+    print(f"step {step:4d} | loss: {loss.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
 
 import sys; sys.exit(0)
 
