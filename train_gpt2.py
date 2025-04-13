@@ -1,4 +1,6 @@
+import os
 import math
+import time
 import inspect
 from dataclasses import dataclass
 import torch
@@ -192,12 +194,14 @@ class GPT(nn.Module):
         ]
         num_decay_parmas=sum(p.numel() for p in decay_params)
         num_nodecay_params=sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_parmas:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        if master_process:
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_parmas:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # 构建AdamW优化器，并采用fused模式，加速训练
         fused_available='fused' in inspect.signature (torch.optim.AdamW).parameters
         use_fused=fused_available and 'cuda' in device
-        print(f"using fused AdamW: {use_fused}")
+        if master_process:
+            print(f"using fused AdamW: {use_fused}")
         optimizer=torch.optim.AdamW(optim_groups,lr=learning_rate,betas=(0.9,0.95),eps=1e-8,fused=use_fused)
         return optimizer
     
@@ -205,9 +209,11 @@ class GPT(nn.Module):
 import tiktoken
 
 class DataLoaderLite:
-    def __init__(self,B,T):
+    def __init__(self,B,T,process_rank,num_processes):
         self.B=B
         self.T=T
+        self.process_rank=process_rank
+        self.num_processes=num_processes
 
         # 从硬盘加载数据，存到内存中
         with open('input.txt','r') as f:
@@ -215,34 +221,61 @@ class DataLoaderLite:
         enc=tiktoken.get_encoding('gpt2')
         tokens=enc.encode(text)
         self.tokens=torch.tensor(tokens)
-        print(f"loaded {len(self.tokens)} tokens")
-        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
+        if master_process:
+            print(f"loaded {len(self.tokens)} tokens")
 
         # state
-        self.current_position=0
-
+        self.current_position=self.B*self.T*self.process_rank
+    
     def next_batch(self):
         B,T=self.B,self.T
         buf=self.tokens[self.current_position: self.current_position+B*T+1]
         x=(buf[:-1]).view(B,T) # 输入
         y=(buf[1:]).view(B,T) # targets
         # 前移current_position位置，为下一次取token准备
-        self.current_position+=B*T
+        self.current_position+=B*T*self.num_processes
         # 如果下一次取样超出数据集，复位起始索引
-        if self.current_position+(B*T+1)>len(self.tokens):
-            self.current_position=0
+        if self.current_position+(B*T*self.num_processes+1)>len(self.tokens):
+            self.current_position=self.B*self.T*self.process_rank
         return x,y
     
 # ----------------------------------------------------------------------------
-# 生成前自动检测设备
-import time
+# 简单运行
+# python train_gpt2.py
+# 分布式数据并行运行启动方式，以2个GPU运算（Karpathy是8个GPU，我这里有两个GPU）
+# torchrun --standalone --nproc_per_node=2 train_gpt2.py
 
-device='cpu'
-if torch.cuda.is_available():
-    device="cuda"
-elif hasattr(torch.backends,"mps") and torch.backends.mps.is_available():
-    device="mps"
-print(f"using device: {device}")
+# 运行循环训练
+from torch.distributed import init_process_group,destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+
+# 设置DDP，分布式数据并行(distributed data parallel)
+# torchrun命令要设置环境变量，RANK,LOCAL_RANK,WORLD_SIZE
+ddp=int(os.environ.get('RANK',-1))!=-1 # 判断此次运行是否是ddp
+if ddp:
+    # ddp运行需要CUDA，我们需要根据进程的标识符设置合适的设备
+    assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
+    init_process_group(backend='nccl')
+    ddp_rank=int(os.environ['RANK']) # 当前进程的全局编号，每个训练进程的唯一ID
+    ddp_local_rank=int(os.environ['LOCAL_RANK']) # 当前进程的GPU编号
+    ddp_world_size=int(os.environ['WORLD_SIZE']) # DDP模式下并行的进程总数
+    device=f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process=ddp_rank==0 # 判断是否是主进程，负责保存模型、打印日志、验证模型
+else:
+    # 非DDP的普通运行方式
+    ddp_rank=0
+    ddp_local_rank=0
+    ddp_world_size=1
+    master_process=True
+    # 生成前自动检测设备
+    device='cpu'
+    if torch.cuda.is_available():
+        device="cuda"
+    elif hasattr(torch.backends,"mps") and torch.backends.mps.is_available():
+        device="mps"
+    print(f"using device: {device}")
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
@@ -251,19 +284,23 @@ if torch.cuda.is_available():
 total_batch_size=524288 # 2^19, ~0.5M, 数量的tokens
 B=8 # 小批量batch
 T=512 # 序列长度
-assert total_batch_size%(B*T)==0, "make sure total_batch_size is divisible by B*T"
-grad_accum_steps=total_batch_size//(B*T)
-print(f"total desired batch size: {total_batch_size}")
-print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
+assert total_batch_size%(B*T*ddp_world_size)==0, "make sure total_batch_size is divisible by B*T*ddp_world_size"
+grad_accum_steps=total_batch_size//(B*T*ddp_world_size)
+if master_process:
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-train_loader=DataLoaderLite(B=B,T=T)
+train_loader=DataLoaderLite(B=B,T=T,process_rank=ddp_rank,num_processes=ddp_world_size)
 
 torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能与精度水平，'high'设置为允许使用 TensorFloat-32（TF32），取性能和精度之间的一个平衡点
 
-# 计算由x预测出的logits
+# 创建模型
 model=GPT(GPTConfig(vocab_size=50304)) # 50304= 128*393，50304可以被更高的2的幂次数整除，更符合GPU的架构
 model.to(device)
 model=torch.compile(model) # 对模型编译，加速训练和推理，需torch2以上版本
+if ddp:
+    model=DDP(model,device_ids=[ddp_local_rank])
+raw_model=model.module if ddp else model # 原始未封装的模型
 
 max_lr=6e-4
 min_lr=max_lr*0.1
@@ -283,7 +320,7 @@ def get_lr(it):
     return min_lr+coeff*(max_lr-min_lr)
 
 # 优化！梯度下降
-optimizer=model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=device)
+optimizer=raw_model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=device)
 
 for step in range(max_steps):
     t0=time.time()
@@ -300,7 +337,11 @@ for step in range(max_steps):
         # 我们要的是梯度均值，除以梯度累计的次数即可
         loss=loss/grad_accum_steps
         loss_accum+=loss.detach()
+        if ddp:
+            model.require_backward_grad_sync=(micro_step==grad_accum_steps-1)
         loss.backward() # 求的是optimizer.zero_grad()前的梯度累积，而不是这里loss的梯度
+    if ddp:
+        dist.all_reduce(loss_accum,op=dist.ReduceOp.AVG)
     norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0) # 如果梯度范数大于1.0，则把所有参数的梯度按比例缩小，使范数变为1.0，这里返回的是裁剪前的梯度范数
     # 设置此轮epoch的学习率
     lr=get_lr(step)
@@ -310,9 +351,13 @@ for step in range(max_steps):
     torch.cuda.synchronize() # 等待GPU完成当前工作,确保time.time()计时的是GPU运行的时间
     t1=time.time()
     dt=t1-t0 # 以秒为单位展示耗时
-    tokens_processed=train_loader.B*train_loader.T*grad_accum_steps
+    tokens_processed=train_loader.B*train_loader.T*grad_accum_steps*ddp_world_size
     tokens_per_sec=tokens_processed/dt
-    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
+    if master_process:
+        print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
+
+if ddp:
+    destroy_process_group()
 
 import sys; sys.exit(0)
 
