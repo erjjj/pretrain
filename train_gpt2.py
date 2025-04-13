@@ -232,7 +232,9 @@ class DataLoaderLite:
         assert len(shards)>0,f'no shards found for split {split}'
         if master_process:
             print(f"found {len(shards)} shards for split {split}")
+        self.reset()
 
+    def reset(self):
         # state, 从第1个shard开始初始化
         self.current_shard=0
         self.tokens=load_tokens(self.shards[self.current_shard])
@@ -304,6 +306,7 @@ if master_process:
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
 train_loader=DataLoaderLite(B=B,T=T,process_rank=ddp_rank,num_processes=ddp_world_size,split='train')
+val_loader=DataLoaderLite(B=B,T=T,process_rank=ddp_rank,num_processes=ddp_world_size,split='val')
 
 torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能与精度水平，'high'设置为允许使用 TensorFloat-32（TF32），取性能和精度之间的一个平衡点
 
@@ -337,6 +340,28 @@ optimizer=raw_model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,dev
 
 for step in range(max_steps):
     t0=time.time()
+
+    # 每隔指定步数评估一下验证集的损失
+    if step%100==0:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum=0.0
+            val_loss_steps=20
+            for _ in range(val_loss_steps):
+                x,y=val_loader.next_batch()
+                x,y=x.to(device),y.to(device)
+                with torch.autocast(device_type=device,dtype=torch.bfloat16):
+                    logits,loss=model(x,y)
+                loss=loss/val_loss_steps
+                val_loss_accum+=loss.detach()
+        if ddp:
+            dist.all_reduce(val_loss_accum,op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+    
+    # 开启训练loop
+    model.train()
     optimizer.zero_grad()
     loss_accum=0.0
     for micro_step in range(grad_accum_steps): 
