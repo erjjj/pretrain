@@ -207,24 +207,35 @@ class GPT(nn.Module):
     
 # ----------------------------------------------------------------------------
 import tiktoken
+import numpy as np
+
+def load_tokens(filename):
+    npt=np.load(filename)
+    ptt=torch.tensor(npt,dtype=torch.long)
+    return ptt
 
 class DataLoaderLite:
-    def __init__(self,B,T,process_rank,num_processes):
+    def __init__(self,B,T,process_rank,num_processes,split):
         self.B=B
         self.T=T
         self.process_rank=process_rank
         self.num_processes=num_processes
+        assert split in {'train','val'}
 
-        # 从硬盘加载数据，存到内存中
-        with open('input.txt','r') as f:
-            text=f.read()
-        enc=tiktoken.get_encoding('gpt2')
-        tokens=enc.encode(text)
-        self.tokens=torch.tensor(tokens)
+        # 获取切片文件名
+        data_root='edu_fineweb10B'
+        shards=os.listdir(data_root)
+        shards=[s for s in shards if split in s]
+        shards=sorted(shards)
+        shards=[os.path.join(data_root,s) for s in shards]
+        self.shards=shards
+        assert len(shards)>0,f'no shards found for split {split}'
         if master_process:
-            print(f"loaded {len(self.tokens)} tokens")
+            print(f"found {len(shards)} shards for split {split}")
 
-        # state
+        # state, 从第1个shard开始初始化
+        self.current_shard=0
+        self.tokens=load_tokens(self.shards[self.current_shard])
         self.current_position=self.B*self.T*self.process_rank
     
     def next_batch(self):
@@ -234,9 +245,11 @@ class DataLoaderLite:
         y=(buf[1:]).view(B,T) # targets
         # 前移current_position位置，为下一次取token准备
         self.current_position+=B*T*self.num_processes
-        # 如果下一次取样超出数据集，复位起始索引
+        # 如果下一次取样超出数据集，来到下一个切片
         if self.current_position+(B*T*self.num_processes+1)>len(self.tokens):
-            self.current_position=self.B*self.T*self.process_rank
+            self.current_shard=(self.current_shard+1)%len(self.shards)
+            self.tokens=load_tokens(self.shards[self.current_shard])
+            self.current_position=B*T*self.process_rank
         return x,y
     
 # ----------------------------------------------------------------------------
@@ -290,7 +303,7 @@ if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-train_loader=DataLoaderLite(B=B,T=T,process_rank=ddp_rank,num_processes=ddp_world_size)
+train_loader=DataLoaderLite(B=B,T=T,process_rank=ddp_rank,num_processes=ddp_world_size,split='train')
 
 torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能与精度水平，'high'设置为允许使用 TensorFloat-32（TF32），取性能和精度之间的一个平衡点
 
@@ -304,8 +317,8 @@ raw_model=model.module if ddp else model # 原始未封装的模型
 
 max_lr=6e-4
 min_lr=max_lr*0.1
-warmup_steps=10
-max_steps=50
+warmup_steps=715
+max_steps=19073
 def get_lr(it):
     # 1) 对于前warmup_iters步steps，线性提高学习率
     if it<warmup_steps:
@@ -354,7 +367,7 @@ for step in range(max_steps):
     tokens_processed=train_loader.B*train_loader.T*grad_accum_steps*ddp_world_size
     tokens_per_sec=tokens_processed/dt
     if master_process:
-        print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
+        print(f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}") # 输出更漂亮些
 
 if ddp:
     destroy_process_group()
