@@ -337,6 +337,7 @@ torch.set_float32_matmul_precision('high') # 设置硬件float32计算的性能�
 
 # 创建模型
 model=GPT(GPTConfig(vocab_size=50304)) # 50304= 128*393，50304可以被更高的2的幂次数整除，更符合GPU的架构
+# model=GPT.from_pretrained('gpt2') # 选择从GPT2 OpenAI初始化
 model.to(device)
 use_compile=False # torch.compile与HellaSwag数据集评估不共存
 if use_compile:
@@ -348,7 +349,7 @@ raw_model=model.module if ddp else model # 原始未封装的模型
 max_lr=6e-4
 min_lr=max_lr*0.1
 warmup_steps=715
-max_steps=19073
+max_steps=19073 # 19073个step是一个epoch，10B/0.5M~19073，不过我的batch_size不是0.5M
 def get_lr(it):
     # 1) 对于前warmup_iters步steps，线性提高学习率
     if it<warmup_steps:
@@ -396,7 +397,19 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file,'a') as f:
                 f.write(f'{step} val {val_loss_accum.item():.4f}\n')
-    
+            if step>0 and (step%5000==0 or last_step):
+                # 每隔一定步数把模型存入到log中
+                checkpoint_path=os.path.join(log_dir,f'model_{step:05d}.pt')
+                checkpoint={
+                    'model':raw_model.state_dict(),
+                    'config':raw_model.config,
+                    'step':step,
+                    'val_loss':val_loss_accum.item()
+                }
+                # 也可以存优化器状态
+                # 也可以存种子等，如果想了解训练的更多细节
+                torch.save(checkpoint,checkpoint_path)
+
     # swag数据评估一下
     if (step%100==0 or last_step) and (not use_compile):
         num_correct_norm=0
